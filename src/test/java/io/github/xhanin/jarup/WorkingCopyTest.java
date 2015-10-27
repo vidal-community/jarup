@@ -151,7 +151,18 @@ public class WorkingCopyTest {
         }
     }
 
+    @Test
+    public void should_add_nonempty_directories() throws Exception {
+        Path archiveUnderTest = getJarUnderTest("example.jar");
+        try (WorkingCopy wc = WorkingCopy.prepareFor(archiveUnderTest)) {
+            wc.copyFileFrom("src/test/resources/new_directory", "newdir");
+        }
 
+        try (WorkingCopy wc = WorkingCopy.prepareFor(archiveUnderTest)) {
+            assertThat(wc.getFile("newdir")).isDirectory();
+            assertThat(wc.readFile("newdir/hello", "UTF-8")).isEqualTo("world!");
+        }
+    }
 
     private Path getJarUnderTest(String archive) throws IOException {
         File dir = tmp.newFolder();

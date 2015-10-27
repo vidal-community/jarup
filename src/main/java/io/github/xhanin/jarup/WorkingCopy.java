@@ -13,8 +13,7 @@ import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static java.nio.file.Files.newBufferedReader;
-import static java.nio.file.Files.newBufferedWriter;
+import static java.nio.file.Files.*;
 
 /**
  * Date: 10/1/14
@@ -25,9 +24,6 @@ public class WorkingCopy implements AutoCloseable {
     private static final long TS = System.currentTimeMillis();
     private static final long R = new Random().nextLong();
     private static final AtomicLong C = new AtomicLong();
-
-    private static final String MANIFEST = JarFile.MANIFEST_NAME;
-    private static final String MANIFEST_DIR = "META-INF/";
 
 
     public static WorkingCopy prepareFor(Path jarPath) throws IOException {
@@ -70,7 +66,7 @@ public class WorkingCopy implements AutoCloseable {
                 unzip(root.toPath().resolve(subPath), explodedPath.toFile());
             }
             archiveRoot = explodedPath;
-            entryName = filePath.substring(filePath.indexOf(":/") + 2);
+            entryName = Entries.entryName(filePath);
             filePath = root.toPath().relativize(explodedPath) + "/" + entryName;
         }
         File file = new File(root, filePath);
@@ -85,39 +81,6 @@ public class WorkingCopy implements AutoCloseable {
         return file.resolveSibling(file.getFileName().toString() + ".$");
     }
 
-    private static void addEntry(Path archiveRoot, String entryName) throws IOException {
-        try (BufferedWriter entries = newBufferedWriter(entriesPath(archiveRoot),
-                UTF_8, StandardOpenOption.APPEND)) {
-            entries.write(entryName(archiveRoot.resolve(entryName), entryName));
-            entries.newLine();
-        }
-    }
-    private static void removeEntry(Path archiveRoot, String entryName) throws IOException {
-        Path path = entriesPath(archiveRoot);
-        File temp = Files.createTempFile(archiveRoot, "temp", "jarup").toFile();
-        try (BufferedReader reader = newBufferedReader(path, UTF_8);
-             BufferedWriter writer = newBufferedWriter(temp.toPath(), UTF_8)) {
-
-            String entryLine = entryName(archiveRoot.resolve(entryName), entryName);
-            String currentLine;
-            while ((currentLine = reader.readLine()) != null) {
-                String current = currentLine.trim();
-                if (current.equals(entryLine)) {
-                    continue;
-                }
-                writer.write(current);
-                writer.newLine();
-            }
-        }
-
-        File target = path.toFile();
-        if (!temp.renameTo(target)) {
-            throw new FileSystemException(
-                String.format("Could not copy temporary entries files <%s> to <%s>", temp.getPath(), target.getPath())
-            );
-        }
-    }
-
     public WorkingCopy writeFile(String path, String encoding, String content) throws IOException {
         File file = getFile(path, FileOperation.UPDATE);
         IOUtils.write(file, Charset.forName(encoding), content);
@@ -125,9 +88,18 @@ public class WorkingCopy implements AutoCloseable {
     }
 
     public WorkingCopy copyFileFrom(String from, String to) throws IOException {
-        File toFile = getFile(to, FileOperation.UPDATE);
+        final File toFile = getFile(to, FileOperation.UPDATE);
         mkdir(toFile.getParentFile());
-        Files.copy(Paths.get(from), toFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+
+        final Path source = Paths.get(from);
+        final Path target = toFile.toPath();
+
+        if (source.toFile().isDirectory()) {
+            walkFileTree(source, new DeepCopyVisitor(root.toPath(), source, target));
+        }
+        else {
+            Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+        }
         return this;
     }
 
@@ -159,7 +131,7 @@ public class WorkingCopy implements AutoCloseable {
             final Path root = from.toPath();
 
             // repackaging uncompressed archives
-            Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
+            walkFileTree(root, new SimpleFileVisitor<Path>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
                     if (!root.equals(dir) && dir.getFileName().toString().endsWith(".$")) {
@@ -174,7 +146,7 @@ public class WorkingCopy implements AutoCloseable {
             });
 
             // process all entries as listed in entries file
-            for (String entry : Files.readAllLines(entriesPath(root), UTF_8)) {
+            for (String entry : Files.readAllLines(Entries.entriesPath(root), UTF_8)) {
                 addZipEntry(out, root, root.resolve(entry));
             }
         }
@@ -184,7 +156,7 @@ public class WorkingCopy implements AutoCloseable {
      * Adds a new file entry to the ZIP output stream.
      */
     private static void addZipEntry(ZipOutputStream out, Path root, Path path) throws IOException {
-        String name = entryName(root, path);
+        String name = Entries.entryName(root, path);
 
         File file = path.toFile();
         boolean isDir = file.isDirectory();
@@ -214,25 +186,11 @@ public class WorkingCopy implements AutoCloseable {
         out.closeEntry();
     }
 
-    private static String entryName(Path root, Path path) {
-        String name = root.relativize(path).toString();
-        return entryName(path, name);
-    }
-
-    private static String entryName(Path path, String name) {
-        name = name.replace(File.separatorChar, '/');
-        if (Files.isDirectory(path)) {
-            name = name.endsWith(File.separator) ? name :
-                    (name + File.separator);
-        }
-        return name;
-    }
-
     private static void unzip(Path from, File to) throws IOException {
         mkdir(to);
 
         try (ZipFile zip = new ZipFile(from.toFile());
-             BufferedWriter entries = newBufferedWriter(entriesPath(to.toPath()), UTF_8)
+             BufferedWriter entries = newBufferedWriter(Entries.entriesPath(to.toPath()), UTF_8)
              ) {
             Enumeration zipFileEntries = zip.entries();
             while (zipFileEntries.hasMoreElements()) {
@@ -261,10 +219,6 @@ public class WorkingCopy implements AutoCloseable {
                 destFile.setLastModified(entry.getTime());
             }
         }
-    }
-
-    private static Path entriesPath(Path root) {
-        return root.resolve("___jarup___entries");
     }
 
     private static void mkdir(File to) throws IOException {
@@ -304,7 +258,7 @@ public class WorkingCopy implements AutoCloseable {
             @Override
             public void updateEntry(File file, Path archiveRoot, String entryName) throws IOException {
                 if (!file.exists()) {
-                    addEntry(archiveRoot, entryName);
+                    Entries.addEntry(archiveRoot, entryName);
                 }
             }
         },
@@ -317,7 +271,7 @@ public class WorkingCopy implements AutoCloseable {
             @Override
             public void updateEntry(File file, Path archiveRoot, String entryName) throws IOException {
                 if (file.exists() && file.delete()) {
-                    removeEntry(archiveRoot, entryName);
+                    Entries.removeEntry(archiveRoot, entryName);
                 }
             }
         };
@@ -326,4 +280,5 @@ public class WorkingCopy implements AutoCloseable {
 
         public abstract void updateEntry(File file, Path archiveRoot, String entryName) throws IOException;
     }
+
 }
